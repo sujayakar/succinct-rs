@@ -21,12 +21,14 @@
 //! ```
 //!
 //! to your `Cargo.toml`.
+#![feature(stdsimd)]
 
 #![doc(html_root_url = "https://docs.rs/succinct/0.5.2")]
 #![warn(missing_docs)]
 
 extern crate byteorder;
 extern crate num_traits;
+extern crate packed_simd;
 
 #[cfg(test)]
 extern crate quickcheck;

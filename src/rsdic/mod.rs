@@ -30,6 +30,14 @@
 //! block. As with rank, we're able to select within a small block directly.
 use std::mem;
 
+use std::arch::x86_64::{
+    __m128i,
+    _mm_sad_epu8,
+};
+use std::u64;
+use std::slice;
+use packed_simd::*;
+
 mod constants;
 mod enum_code;
 
@@ -101,10 +109,58 @@ impl RankSupport for RsDic {
         let sblock_start = (lblock * SMALL_BLOCK_PER_LARGE_BLOCK) as usize;
         let sblock = (pos / SMALL_BLOCK_SIZE) as usize;
 
-        for &sb_class in &self.sb_classes[sblock_start..sblock] {
-            pointer += ENUM_CODE_LENGTH[sb_class as usize] as u64;
-            rank += sb_class as u64;
-        }
+        let to_load = sblock - sblock_start;
+        let lo_shift = to_load as u32 * 8;
+        let lo_mask = !u64::MAX.checked_shl(lo_shift).unwrap_or(0);
+        let hi_shift = to_load.saturating_sub(8) as u32 * 8;
+        let hi_mask = !u64::MAX.checked_shl(hi_shift).unwrap_or(0);
+
+        let ix_mask64 = u64x2::new(lo_mask, hi_mask);
+        let ix_mask = unsafe { mem::transmute::<_, u8x16>(ix_mask64) };
+
+        let classes = unsafe {
+            let start = self.sb_classes.as_ptr().offset(sblock_start as isize);
+            let block = slice::from_raw_parts(start, 16);
+            let block = u8x16::from_slice_aligned_unchecked(block);
+            block & ix_mask
+        };
+
+        let zero_m128: __m128i = u16x8::splat(0).into_bits();
+        let class_sum = unsafe {
+            let classes_m128: __m128i = classes.into_bits();
+            let sum_m128 = _mm_sad_epu8(zero_m128, classes_m128);
+            u64x2::from_bits(sum_m128).wrapping_sum()
+        };
+
+        let indices = classes.min(u8x16::splat(64) - classes).min(u8x16::splat(15));
+
+        const ENUM_CODE_VECTOR: u8x16 = u8x16::new(
+            ENUM_CODE_LENGTH[0],
+            ENUM_CODE_LENGTH[1],
+            ENUM_CODE_LENGTH[2],
+            ENUM_CODE_LENGTH[3],
+            ENUM_CODE_LENGTH[4],
+            ENUM_CODE_LENGTH[5],
+            ENUM_CODE_LENGTH[6],
+            ENUM_CODE_LENGTH[7],
+            ENUM_CODE_LENGTH[8],
+            ENUM_CODE_LENGTH[9],
+            ENUM_CODE_LENGTH[10],
+            ENUM_CODE_LENGTH[11],
+            ENUM_CODE_LENGTH[12],
+            ENUM_CODE_LENGTH[13],
+            ENUM_CODE_LENGTH[14],
+            ENUM_CODE_LENGTH[15],
+        );
+        let code_lengths = ENUM_CODE_VECTOR.shuffle1_dyn(indices);
+        let length_sum = unsafe {
+            let code_lengths_m128: __m128i = code_lengths.into_bits();
+            let sum_m128 = _mm_sad_epu8(zero_m128, code_lengths_m128);
+            u64x2::from_bits(sum_m128).wrapping_sum()
+        };
+
+        pointer += length_sum;
+        rank += class_sum;
 
         // If we aren't on a small block boundary, add in the rank within the small block.
         if pos % SMALL_BLOCK_SIZE != 0 {
